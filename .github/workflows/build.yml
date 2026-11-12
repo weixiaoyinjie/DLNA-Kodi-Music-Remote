@@ -1,4 +1,3 @@
-
 name: Build Android APK
 
 on:
@@ -16,6 +15,61 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
+      - name: Find or unpack Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The repository can hold the Android project at its root,
+          # in a subfolder, or as a ZIP file uploaded from a phone.
+          EXTRACT_ROOT="$RUNNER_TEMP/dlna-kodi-extracted"
+          mkdir -p "$EXTRACT_ROOT"
+
+          # Prefer an already extracted Gradle project.
+          PROJECT=""
+          if [ -f "$GITHUB_WORKSPACE/settings.gradle" ] || [ -f "$GITHUB_WORKSPACE/settings.gradle.kts" ]; then
+            PROJECT="$GITHUB_WORKSPACE"
+          else
+            while IFS= read -r -d '' gradle_file; do
+              candidate="$(dirname "$gradle_file")"
+              if [ -f "$candidate/app/build.gradle" ] || [ -f "$candidate/app/build.gradle.kts" ]; then
+                PROJECT="$candidate"
+                break
+              fi
+            done < <(find "$GITHUB_WORKSPACE" -maxdepth 6 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -not -path '*/.git/*' -print0)
+          fi
+
+          # If the repo contains just build.yml and an uploaded source ZIP,
+          # extract ZIP files and find settings.gradle inside them.
+          if [ -z "$PROJECT" ]; then
+            count=0
+            while IFS= read -r -d '' zip_file; do
+              count=$((count + 1))
+              unzip_to="$EXTRACT_ROOT/archive_$count"
+              mkdir -p "$unzip_to"
+              echo "Extracting: $zip_file"
+              unzip -q "$zip_file" -d "$unzip_to"
+            done < <(find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -iname '*.zip' -print0)
+
+            while IFS= read -r -d '' gradle_file; do
+              candidate="$(dirname "$gradle_file")"
+              if [ -f "$candidate/app/build.gradle" ] || [ -f "$candidate/app/build.gradle.kts" ]; then
+                PROJECT="$candidate"
+                break
+              fi
+            done < <(find "$EXTRACT_ROOT" -maxdepth 8 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
+          fi
+
+          if [ -z "$PROJECT" ]; then
+            echo '::error::No Android Gradle project found. Upload the complete project ZIP (DLNA-Kodi-Music-Remote-v1.2-Source.zip) to the repository root, or upload settings.gradle, build.gradle, gradle.properties and app/ at the repository root.'
+            echo 'Repository files:'
+            find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -not -path '*/.git/*' | head -80
+            exit 1
+          fi
+          echo "Android project found: $PROJECT"
+          ls -la "$PROJECT"
+          echo "PROJECT_DIR=$PROJECT" >> "$GITHUB_ENV"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
@@ -30,6 +84,7 @@ jobs:
           echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
           SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$SDKMANAGER" || { echo "Missing sdkmanager: $SDKMANAGER"; exit 1; }
           "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle 8.9
@@ -38,11 +93,17 @@ jobs:
           gradle-version: '8.9'
 
       - name: Build debug APK
-        run: gradle --no-daemon --stacktrace :app:assembleDebug
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PROJECT_DIR"
+          gradle --no-daemon --stacktrace :app:assembleDebug
+          mkdir -p "$GITHUB_WORKSPACE/apk-output"
+          cp app/build/outputs/apk/debug/*.apk "$GITHUB_WORKSPACE/apk-output/"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: DLNA-Kodi-Music-Remote-debug
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: apk-output/*.apk
           if-no-files-found: error
