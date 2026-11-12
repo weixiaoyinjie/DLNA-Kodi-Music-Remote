@@ -15,54 +15,67 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Find or unpack Android project
+      - name: Find newest Android source ZIP or project
         id: project
         shell: bash
         run: |
           set -euo pipefail
-          # The repository can hold the Android project at its root,
-          # in a subfolder, or as a ZIP file uploaded from a phone.
+          # Prefer the highest-versioned ZIP even when older sources are
+          # already unpacked in the repository. This matters when uploading
+          # from a phone without deleting older versions.
           EXTRACT_ROOT="$RUNNER_TEMP/dlna-kodi-extracted"
           mkdir -p "$EXTRACT_ROOT"
-
-          # Prefer an already extracted Gradle project.
           PROJECT=""
-          if [ -f "$GITHUB_WORKSPACE/settings.gradle" ] || [ -f "$GITHUB_WORKSPACE/settings.gradle.kts" ]; then
-            PROJECT="$GITHUB_WORKSPACE"
-          else
+
+          while IFS= read -r -d '' zip_file; do
+            echo "Trying source archive: $zip_file"
+            rm -rf "$EXTRACT_ROOT/project"
+            mkdir -p "$EXTRACT_ROOT/project"
+            unzip -q "$zip_file" -d "$EXTRACT_ROOT/project"
             while IFS= read -r -d '' gradle_file; do
               candidate="$(dirname "$gradle_file")"
               if [ -f "$candidate/app/build.gradle" ] || [ -f "$candidate/app/build.gradle.kts" ]; then
                 PROJECT="$candidate"
                 break
               fi
-            done < <(find "$GITHUB_WORKSPACE" -maxdepth 6 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -not -path '*/.git/*' -print0)
+            done < <(find "$EXTRACT_ROOT/project" -maxdepth 8 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
+            if [ -n "$PROJECT" ]; then break; fi
+          done < <(find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -iname 'DLNA-Kodi-Music-Remote-v*-Source.zip' -print0 | sort -zVr)
+
+          # If no versioned source ZIP exists, use the normal Gradle project.
+          if [ -z "$PROJECT" ]; then
+            if [ -f "$GITHUB_WORKSPACE/settings.gradle" ] || [ -f "$GITHUB_WORKSPACE/settings.gradle.kts" ]; then
+              PROJECT="$GITHUB_WORKSPACE"
+            else
+              while IFS= read -r -d '' gradle_file; do
+                candidate="$(dirname "$gradle_file")"
+                if [ -f "$candidate/app/build.gradle" ] || [ -f "$candidate/app/build.gradle.kts" ]; then
+                  PROJECT="$candidate"
+                  break
+                fi
+              done < <(find "$GITHUB_WORKSPACE" -maxdepth 6 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -not -path '*/.git/*' -print0)
+            fi
           fi
 
-          # If the repo contains just build.yml and an uploaded source ZIP,
-          # extract ZIP files and find settings.gradle inside them.
+          # Generic ZIP fallback for people who renamed the downloaded file.
           if [ -z "$PROJECT" ]; then
-            count=0
             while IFS= read -r -d '' zip_file; do
-              count=$((count + 1))
-              unzip_to="$EXTRACT_ROOT/archive_$count"
-              mkdir -p "$unzip_to"
-              echo "Extracting: $zip_file"
-              unzip -q "$zip_file" -d "$unzip_to"
-            done < <(find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -iname '*.zip' -print0)
-
-            while IFS= read -r -d '' gradle_file; do
-              candidate="$(dirname "$gradle_file")"
-              if [ -f "$candidate/app/build.gradle" ] || [ -f "$candidate/app/build.gradle.kts" ]; then
-                PROJECT="$candidate"
-                break
-              fi
-            done < <(find "$EXTRACT_ROOT" -maxdepth 8 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
+              rm -rf "$EXTRACT_ROOT/project"
+              mkdir -p "$EXTRACT_ROOT/project"
+              unzip -q "$zip_file" -d "$EXTRACT_ROOT/project"
+              while IFS= read -r -d '' gradle_file; do
+                candidate="$(dirname "$gradle_file")"
+                if [ -f "$candidate/app/build.gradle" ] || [ -f "$candidate/app/build.gradle.kts" ]; then
+                  PROJECT="$candidate"
+                  break
+                fi
+              done < <(find "$EXTRACT_ROOT/project" -maxdepth 8 -type f \( -name settings.gradle -o -name settings.gradle.kts \) -print0)
+              if [ -n "$PROJECT" ]; then break; fi
+            done < <(find "$GITHUB_WORKSPACE" -maxdepth 4 -type f -iname '*.zip' -print0 | sort -zVr)
           fi
 
           if [ -z "$PROJECT" ]; then
-            echo '::error::No Android Gradle project found. Upload the complete project ZIP (DLNA-Kodi-Music-Remote-v1.2-Source.zip) to the repository root, or upload settings.gradle, build.gradle, gradle.properties and app/ at the repository root.'
-            echo 'Repository files:'
+            echo '::error::找不到 Android 项目。请把完整源码 ZIP 上传到仓库根目录。'
             find "$GITHUB_WORKSPACE" -maxdepth 3 -type f -not -path '*/.git/*' | head -80
             exit 1
           fi
